@@ -1,9 +1,11 @@
+import logging, time
 import argparse
 import requests
 import json
-from lxml import etree
 
 from config import archivesspace, dspace
+
+logging.basicConfig(filename='resource_to_collection.log', level=logging.DEBUG, format='%(asctime)s %(message)s')
 
 parser = argparse.ArgumentParser(description='Create or update a DSpace collection from an ArchivesSpace resource.')
 parser.add_argument(
@@ -17,17 +19,27 @@ parser.add_argument(
 args = parser.parse_args()
 
 def archivesspace_authentication(base_url, user, password):
+    logging.info('Logging into ArchivesSpace')
     url = base_url + '/users/' + user + '/login?password=' + password
-    response = requests.post(url)
+    try:
+        response = requests.post(url)
+    except:
+        logging.debug('Unable to authenticate... check the config file?')
+        exit()
     
     token = response.json().get('session')
     
     return token
     
 def dspace_authentication(base_url, email, password):
+    logging.info('Logging into DSpace')
     url = base_url + "/RESTapi/login"
     body = {"email": email, "password": password}
-    response = requests.post(url, json=body)
+    try:
+        response = requests.post(url, json=body)
+    except:
+        logging.debug('Unable to authenticate... check the config file?')
+        exit()
 
     token = response.text
     
@@ -38,6 +50,7 @@ dspace_token = dspace_authentication(dspace.get('base_url'), dspace.get('email')
 
 # create and update functions
 def parse_resource_id(resource):
+    logging.info('Parsing ArchivesSpace Resource ID')
     # matches:
     #  * 'http://141.211.39.87:8080/resources/:id/edit#tree::resource_:id'
     #  * 'http://141.211.39.87:8080/resources/:id'
@@ -48,26 +61,35 @@ def parse_resource_id(resource):
     elif resource.isdigit():
         resource_id = resource
     else:
-        print 'Unable to parse resource ID from ' + resource + '.'
+        logging.debug('Unable to parse resource ID from ' + resource)
         exit()
+        
+    logging.info('ArchivesSpace Resource ID: ' + resource_id)
         
     return resource_id
     
 def get_resource(base_url, resource_id, token):
+    logging.info('GETting ArchivesSpace Resource')
     url = base_url + '/repositories/2/resources/' + str(resource_id)
     headers = {'X-ArchivesSpace-Session': token}
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET ArchivesSpace Resource... does it exist?')
+        exit()
     
     resource = response.json()
     
     return resource
     
 def instance_check(resource):
+    logging.info('Checking to see if ArchivesSpace Resource already has a Digital Object instance.')
     if len(resource.get('instances')) > 0:
-        print 'Resource already has an instance.'
+        logging.debug('ArchivesSpace Resource has a Digital Object instance... should you update instead?')
         exit()
     
 def create_introductory_text(resource):
+    logging.info('Creating introductory text for DSpace Collection')
     with open('introductory_text.txt', mode='r') as f:
         introductory_text = f.read()
     introductory_text = introductory_text.replace('TITLE_PLACEHOLDER', resource.get('title'))
@@ -82,6 +104,7 @@ def create_introductory_text(resource):
     return introductory_text
     
 def create_collection(resource):
+    logging.info('Creating DSpace Collection')
     collection = {}
     collection['name'] = resource.get('title').title() 
     introductory_text = create_introductory_text(resource)
@@ -92,12 +115,16 @@ def create_collection(resource):
     return collection
     
 def post_collection(base_url, community_id, token, collection):
+    logging.info('POSTing DSpace Collection')
     url = base_url + '/RESTapi/communities/' + str(community_id) + '/collections'
     headers = {
         "Accept": "application/json",
         "rest-dspace-token": token
     }
-    response = requests.post(url, headers=headers, json=collection)
+    try:
+        response = requests.post(url, headers=headers, json=collection)
+    except:
+        logging.debug('Unable to POST DSpace Collection')
     
     collection = response.json()
     collection_handle = collection.get('handle')
@@ -105,38 +132,57 @@ def post_collection(base_url, community_id, token, collection):
     return collection_handle
     
 def update_introductory_text(base_url, collection_handle, token):
+    logging.info('Updating introductory text of DSpace Collection with DSpace Collection Handle')
+    logging.info('GETting DSpace Collection')
     url = base_url + '/RESTapi/handle/' + collection_handle
     headers = {
         "Accept": "application/json",
         "rest-dspace-token": token
     }
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET DSpace Collection')
+        exit()
     
     collection = response.json()
+    
+    logging.info('Updating introductory text')
+    logging.info('PUTting DSpace Collection with updated introductory text')
     collection['introductoryText'] = collection['introductoryText'].replace('COLLECTION_HANDLE_PLACEHOLDER', collection_handle)
     url = base_url + '/RESTapi/collections/' + str(collection.get('id'))
     headers={
         'Accept': 'application/json',
         'rest-dspace-token': token
     }
-    response = requests.put(url, headers=headers, json=collection)
+    try:
+        response = requests.put(url, headers=headers, json=collection)
+    except:
+        logging.debug('Unable to PUT DSpace Collection with updated introductory text')
+        exit()
     
 def create_digital_object(collection_handle, base_url, token):
+    logging.info('Creating ArchivesSpace Digital Object')
+    logging.info('POSTing ArchivesSpace Digital Object')
     digital_object = {
-        "title": resource.get('title'),
-        "digital_object_id": 'https://dev.deepblue.lib.umich.edu/handle/' + collection_handle,
-        "publish": False,
-        "file_versions": [
+        'title': resource.get('title'),
+        'digital_object_id': 'https://dev.deepblue.lib.umich.edu/handle/' + collection_handle,
+        'publish': False,
+        'file_versions': [
             {
-                "file_uri": 'https://dev.deepblue.lib.umich.edu/handle/' + collection_handle,
-                "xlink_show_attribute": "new",
-                "xlink_actuate_attribute":"onRequest"
+                'file_uri': 'https://dev.deepblue.lib.umich.edu/handle/' + collection_handle,
+                'xlink_show_attribute': 'new',
+                'xlink_actuate_attribute': 'onRequest'
             }
         ]
     }
     url = base_url + '/repositories/2/digital_objects'
     headers = {'X-ArchivesSpace-Session': token}
-    response = requests.post(url, headers=headers, json=digital_object)
+    try:
+        response = requests.post(url, headers=headers, json=digital_object)
+    except:
+        logging.debug('Unable to POST ArchivesSpace Digital Object')
+        exit()
     
     digital_object = response.json()
     digital_object_ref = digital_object.get('uri')
@@ -144,10 +190,18 @@ def create_digital_object(collection_handle, base_url, token):
     return digital_object_ref
     
 def link_digital_object(base_url, resource_id, token, digital_object_ref):
+    logging.info('Linking ArchivesSpace Digital Object to ArchivesSpace Resource')
+    logging.info('GETting ArchivesSpace Resource')
     url = base_url + '/repositories/2/resources/' + str(resource_id)
     headers = {'X-ArchivesSpace-Session': token}
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET ArchivesSpace Resource')
+        exit()
     
+    logging.info('Updating ArchivesSpace Resource')
+    logging.info('POSTing ArchivesSpace Resource with ArchivesSpace Digital Object')
     resource['instances'] = [
         {
             'instance_type': 'digital_object', 
@@ -156,63 +210,103 @@ def link_digital_object(base_url, resource_id, token, digital_object_ref):
             }
         }
     ]
-    response = requests.post(url, headers=headers, json=resource)
-
+    try:
+        response = requests.post(url, headers=headers, json=resource)
+    except:
+        logging.debug('Unable to POST ArchivesSpace Resource with ArchivesSpace Digital Object')
+        exit()
+        
 # update functions only
 def get_collection(resource, base_url, token):
+    logging.info('Getting DSpace Collection Handle')
     try:
         instance = resource.get('instances')[0]
     except:
-        print 'Resource does not have an instance.'
+        logging.debug('ArchivesSpace Resource does not have a Digital Object instance... should you create instead?.')
         exit()
+    
     digital_object = instance.get('digital_object')
     digital_object_ref = digital_object.get('ref')
     
+    logging.info('GETting ArchivesSpace Digital Object')
     url = base_url + digital_object_ref
     headers={'X-ArchivesSpace-Session': token}
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET ArchivesSpace Digital Object')
+        exit()
  
     digital_object = response.json()
+    
     file_version = digital_object.get('file_versions')[0]
     file_uri = file_version.get('file_uri')
     collection_handle = file_uri.replace('https://dev.deepblue.lib.umich.edu/handle/', '')
+    logging.info('Collection Handle to be updated: ' + collection_handle)
     
     return collection_handle
     
 def put_collection(base_url, collection_handle, token, updated_collection):
+    logging.info('Updating DSpace Collection with updated ArchivesSpace Resource')
+    logging.info('GETting DSpace Collection')
     url = base_url + '/RESTapi/handle/' + collection_handle
     headers = {
         'Accept': 'application/json',
         'rest-dspace-token': token
     }
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET DSpace Collection')
+        exit()
     
     collection = response.json()
     collection_id = collection.get('id')
     
+    # DSpace has "stale" data, so this needs to be updated here (rather than with the update_introductory_text function) 
+    # https://github.com/DSpace/DSpace/pull/561
+    logging.info('Updating DSpace Collection')
     updated_collection['introductoryText'] = updated_collection['introductoryText'].replace('COLLECTION_HANDLE_PLACEHOLDER', collection_handle)
 
+    logging.info('PUTting updated DSpace Collection')
     url = base_url + '/RESTapi/collections/' + str(collection_id)
     headers = {
         'Accept': 'application/json',
         'rest-dspace-token': token
     }
-    response = requests.put(url, headers=headers, json=updated_collection)
+    try:
+        response = requests.put(url, headers=headers, json=updated_collection)
+    except:
+        logging.debug('Unable to PUT DSpace Collection')
+        exit()
     
 def update_digital_object(resource, base_url, token):
+    logging.info('Updating ArchivesSpace Digital Object with updated title')
     instance = resource.get('instances')[0]
     digital_object = instance.get('digital_object')
     digital_object_ref = digital_object.get('ref')
     
+    logging.info('GETting ArchivesSpace Digital Object')
     url = base_url + digital_object_ref
     headers={'X-ArchivesSpace-Session': token}
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except:
+        logging.debug('Unable to GET ArchivesSpace Digital Object')
+        exit()
  
     digital_object = response.json()
+    
+    logging.info('Updating ArchivesSpace Digital Object')
     digital_object['title'] = resource.get('title')
     
-    response = requests.post(url, headers=headers, json=digital_object)
-
+    logging.info('POSTting ArchivesSpace Digital Object')
+    try:
+        response = requests.post(url, headers=headers, json=digital_object)
+    except:
+        logging.debug('Unable to POST ArchivesSpace Digital Object')
+        exit()
+        
 if args.function == 'create':
     resource_id = parse_resource_id(args.resource)
     resource = get_resource(archivesspace.get('base_url'), resource_id, archivesspace_token)
