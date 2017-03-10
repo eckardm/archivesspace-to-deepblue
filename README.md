@@ -1,9 +1,15 @@
 Resource-to-Collection
 ======================
 
-usage: resource_to_collection.py [-h] -r RESOURCE {create,update}
+usage: resource_to_collection.py [-h] -r RESOURCE [-c COLLECTION] [-s SPACE]
+                                 [-u UNIQNAME]
+                                 {create,update}
 
-Create or update a DSpace collection from an ArchivesSpace resource.
+Create or update a DSpace Collection from an ArchivesSpace Resource (also
+creates an Archivematica Storage Service Location for the DSpace Collection,
+creates and links an ArchivesSpace Digital Object for the DSpace Collection to
+the ArchivesSpace Resource, and notifies the processor via a message on
+Slack).
 
 positional arguments:
   {create,update}       either create or update
@@ -11,22 +17,36 @@ positional arguments:
 optional arguments:
   -h, --help            show this help message and exit
   -r RESOURCE, --resource RESOURCE
-                        an archivesspace resource
-                        
-If you select create, Resource-to-Collection will:
-  * parse the ArchivesSpace Resource ID;
-  * get the ArchivesSpace Resource;
-  * check to see if a ArchivesSpace Digital Object Instance exists, and if not...
-  * create a DSpace Collection from a template (introductory_text.txt) and the ArchivesSpace Resource;
-  * post the DSpace Collection;
-  * update the "View all items in this collection" button;
-  * create an ArchivesSpace Digital Object; and 
-  * link the ArchivesSpace Digital Object to the ArchivesSpace Resource.
+                        an archivesspace resource (source of collection
+                        metadata)
+  -c COLLECTION, --collection COLLECTION
+                        a dspace collection (to be created or updated)
+  -s SPACE, --space SPACE
+                        an archivematica storage service space (to which a
+                        location will be added)
+  -u UNIQNAME, --uniqname UNIQNAME
+                        the uniqname (of processor)
 
-If you select update, Resource-to-Collection will:
-  * parse the ArchivesSpace Resource ID;
-  * get the ArchivesSpace Resource;
-  * update the DSpace Collection from a template (introductory_text.txt) and the updated ArchivesSpace Resource;
-  * get the DSpace Collection Handle from the ArchivesSpace Digital Object linked to the ArchivesSpace Resource;
-  * pur the DSpace Collection; and
-  * update the ArchivesSpace Digital Object.
+Sample config.ini file:
+
+```
+[archivesspace]
+base_url = http://141.211.39.87:8089
+user = eckardm
+password = password
+repository = 2
+
+[dspace]
+base_url = https://dev.deepblue.lib.umich.edu
+email = eckardm@umich.edu
+password = password
+community_id = 35
+
+[archivematica_storage_service]
+url = http://rumble.umdl.umich.edu:8000
+username = eckardm
+password = password
+
+[slack]
+token = token
+```

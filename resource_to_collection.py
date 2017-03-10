@@ -1,26 +1,40 @@
-import logging, time
 import argparse
-import requests
+import configparser
 import json
+import logging
+import requests
+from selenium import webdriver
+from slackclient import SlackClient
 
-from config import archivesspace, dspace
+config = configparser.ConfigParser()
+config.read('config.ini')
 
-logging.basicConfig(filename='resource_to_collection.log', level=logging.DEBUG, format='%(asctime)s %(message)s')
-
-parser = argparse.ArgumentParser(description='Create or update a DSpace collection from an ArchivesSpace resource.')
+parser = argparse.ArgumentParser(description = 'Create or update a DSpace Collection from an ArchivesSpace Resource (also creates an Archivematica Storage Service Location for the DSpace Collection, creates and links an ArchivesSpace Digital Object for the DSpace Collection to the ArchivesSpace Resource, and notifies the processor via a message on Slack).')
 parser.add_argument(
-    'function', choices=['create', 'update'],
-    help='either create or update'
+    'function', choices = ['create', 'update'],
+    help = 'either create or update'
 )
 parser.add_argument(
     '-r', '--resource', required=True, 
-    help='an archivesspace resource'
+    help = 'an archivesspace resource (source of collection metadata)'
+)
+parser.add_argument(
+    '-c', '--collection', required=False,
+    help = 'a dspace collection (to be created or updated)'
+)
+parser.add_argument(
+    '-s', '--space', required=False,
+    help = 'an archivematica storage service space (to which a location will be added)'
+)
+parser.add_argument(
+    '-u', '--uniqname', required=False,
+    help = 'the uniqname (of processor)'
 )
 args = parser.parse_args()
 
-def archivesspace_authentication(base_url, user, password):
+def archivesspace_authentication(archivesspace_base_url, archivesspace_user, archivesspace_password):
     logging.info('Logging into ArchivesSpace')
-    url = base_url + '/users/' + user + '/login?password=' + password
+    url = archivesspace_base_url + '/users/' + archivesspace_user + '/login?password=' + archivesspace_password
     try:
         response = requests.post(url)
     except:
@@ -31,10 +45,10 @@ def archivesspace_authentication(base_url, user, password):
     
     return token
     
-def dspace_authentication(base_url, email, password):
+def dspace_authentication(dspace_base_url, dspace_email, dspace_password):
     logging.info('Logging into DSpace')
-    url = base_url + "/RESTapi/login"
-    body = {"email": email, "password": password}
+    url = dspace_base_url + "/RESTapi/login"
+    body = {"email": dspace_email, "password": dspace_password}
     try:
         response = requests.post(url, json=body)
     except:
@@ -45,8 +59,8 @@ def dspace_authentication(base_url, email, password):
     
     return token
 
-archivesspace_token = archivesspace_authentication(archivesspace.get('base_url'), archivesspace.get('user'), archivesspace.get('password'))
-dspace_token = dspace_authentication(dspace.get('base_url'), dspace.get('email'), dspace.get('password'))
+archivesspace_token = archivesspace_authentication(config['archivesspace']['base_url'], config['archivesspace']['user'], config['archivesspace']['password'])
+dspace_token = dspace_authentication(config['dspace']['base_url'], config['dspace']['email'], config['dspace']['password'])
 
 # create and update functions
 def parse_resource_id(resource):
@@ -307,22 +321,76 @@ def update_digital_object(resource, base_url, token):
         logging.debug('Unable to POST ArchivesSpace Digital Object')
         exit()
         
+def create_archivematica_storage_service_location(archivematica_storage_service_url, archivematica_storage_service_username, archivematica_storage_service_password, archivematica_storage_service_space, dspace_base_url,  dspace_collection_handle, archivesspace_resource_title):
+    logging.info('Adding Archivematica Storage Service Location')
+    driver = webdriver.Firefox()
+    
+    # archivematica storage service authentication
+    driver.get(archivematica_storage_service_url)
+    assert 'Archivematica Storage Service' in driver.title
+    username = driver.find_element_by_id('id_username')
+    username.clear()
+    username.send_keys(archivematica_storage_service_username)
+    password = driver.find_element_by_id('id_password')
+    password.clear()
+    password.send_keys(archivematica_storage_service_password)
+    form = driver.find_element_by_xpath('//form')
+    form.submit()
+    
+    # create archivematica storage service location
+    driver.get(archivematica_storage_service_url + '/spaces/' + archivematica_storage_service_space + '/location_create/')
+    assert 'Archivematica Storage Service' in driver.title
+    purpose = driver.find_element_by_id('id_purpose')
+    for option in purpose.find_elements_by_tag_name('option'):
+        if option.text == 'AIP Storage':
+            option.click()
+    relative_path = driver.find_element_by_id('id_relative_path')
+    relative_path.clear()
+    relative_path.send_keys(dspace_base_url + '/swordv2/collection/' + dspace_collection_handle)
+    description = driver.find_element_by_id('id_description')
+    description.clear()
+    description.send_keys(archivesspace_resource_title)
+    form = driver.find_element_by_xpath('//form')
+    form.submit()
+    
+    driver.close()
+        
+def notify_processor(uniqname, resource, collection_handle):
+    logging.info('Notifying Processor')
+    slack_client = SlackClient(config['slack']['token'])
+    channels_call = slack_client.api_call("channels.list")
+    users_call = slack_client.api_call("users.list")
+    if users_call.get("ok"):
+        members = users_call["members"]
+    member_id = [member["id"] for member in members if member["name"] == uniqname][0]
+    slack_client.api_call(
+        "chat.postMessage",
+        channel = "C2B25BKTM",
+        text = "Hey <@" + member_id + ">, the *" + resource.get("title") + "* Collection has been added to DeepBlue: https://dev.deepblue.lib.umich.edu/handle/" + collection_handle + "\nDeposit away! :partyparrot:",
+        username = "ArchivesSpace-Archivematica-DSpace bot",
+        icon_emoji = ':robot_face:',
+    )
+
 if args.function == 'create':
     resource_id = parse_resource_id(args.resource)
-    resource = get_resource(archivesspace.get('base_url'), resource_id, archivesspace_token)
+    resource = get_resource(config['archivesspace']['base_url'], resource_id, archivesspace_token)
     instance_check(resource)
     collection = create_collection(resource)
-    collection_handle = post_collection(dspace.get('base_url'), 35, dspace_token, collection)
-    update_introductory_text(dspace.get('base_url'), collection_handle, dspace_token)
-    digital_object_ref = create_digital_object(collection_handle, archivesspace.get('base_url'), archivesspace_token)
-    link_digital_object(archivesspace.get('base_url'), resource_id, archivesspace_token, digital_object_ref)
-    print collection_handle + ' created.'
+    collection_handle = post_collection(config['dspace']['base_url'], config['dspace']['community_id'], dspace_token, collection)
+    update_introductory_text(config['dspace']['base_url'], collection_handle, dspace_token)
+    digital_object_ref = create_digital_object(collection_handle, config['archivesspace']['base_url'], archivesspace_token)
+    link_digital_object(config['archivesspace']['base_url'], resource_id, archivesspace_token, digital_object_ref)
+    if args.space:
+        create_archivematica_storage_service_location(config['archivematica_storage_service']['url'], config['archivematica_storage_service']['username'], config['archivematica_storage_service']['password'], args.space, config['dspace']['base_url'], collection_handle, resource['title'])
+    if args.uniqname:
+        notify_processor(args.uniqname, resource, collection_handle)
+    logging.info(collection_handle + ' created.')
     
 elif args.function == 'update':
     resource_id = parse_resource_id(args.resource)
-    resource = get_resource(archivesspace.get('base_url'), resource_id, archivesspace_token)
+    resource = get_resource(config['archivesspace']['base_url'], resource_id, archivesspace_token)
     updated_collection = create_collection(resource)
-    collection_handle = get_collection(resource, archivesspace.get('base_url'), archivesspace_token)
-    put_collection(dspace.get('base_url'), collection_handle, dspace_token, updated_collection)
-    update_digital_object(resource, archivesspace.get('base_url'), archivesspace_token)
-    print collection_handle + ' updated.'
+    collection_handle = get_collection(resource, config['archivesspace']['base_url'], archivesspace_token)
+    put_collection(config['dspace']['base_url'], collection_handle, dspace_token, updated_collection)
+    update_digital_object(resource, config['archivesspace']['base_url'], archivesspace_token)
+    logging.info(collection_handle + ' updated.')
